@@ -3,3 +3,4 @@ uvicorn
 pymongo
 bcrypt
 pydantic
+PyJWT==2.8.0
