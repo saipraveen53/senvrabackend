@@ -38,13 +38,12 @@ app.add_middleware(
 SECRET_KEY = "senvra_super_secret_key"
 MONGO_URI = "mongodb+srv://saipraveenthandra99:sai@cluster0.9wmwes8.mongodb.net/?appName=Cluster0"
 
-# ========== EMAIL SMTP CONFIGURATION (Directly in code) ==========
-# Gmail SMTP Settings - Replace with your credentials
+# ========== EMAIL SMTP CONFIGURATION ==========
 SMTP_HOST = "smtp.gmail.com"
 SMTP_PORT = 587
-SMTP_USER = "saipraveenthandra99@gmail.com"  # Replace with your email
-SMTP_PASSWORD = "hqqp ioau acds jqgk"  # Replace with your Gmail app password
-SMTP_FROM_EMAIL = "saipraveenthandra99@gmail.com"  # Replace with your email
+SMTP_USER = "saipraveenthandra99@gmail.com"
+SMTP_PASSWORD = "hqqpioauacdsjqgk"
+SMTP_FROM_EMAIL = "saipraveenthandra99@gmail.com"
 
 # ========== DATABASE CONNECTION ==========
 client = None
@@ -101,6 +100,16 @@ class OTPRequest(BaseModel):
 class OTPVerifyRequest(BaseModel):
     assessment_id: str
     otp: str
+
+class PasswordVerifyRequest(BaseModel):
+    assessment_id: str
+    password: str
+
+class CertificateDownloadRequest(BaseModel):
+    assessment_id: str
+    method: str  # "otp" or "password"
+    otp: str = None
+    password: str = None
 
 # ========== OTP FUNCTIONS ==========
 def generate_alphanumeric_otp(length=6):
@@ -444,6 +453,13 @@ def generate_pdf_certificate(certificate_data):
         print(f"PDF generation error: {e}")
         return None
 
+def verify_user_password(email, password):
+    """Verify user's login password"""
+    user = users_collection.find_one({"email": email})
+    if not user:
+        return False
+    return bcrypt.checkpw(password.encode('utf-8'), user["password"].encode('utf-8'))
+
 # ========== AUTH ROUTES ==========
 @app.post("/api/auth/signup", status_code=status.HTTP_201_CREATED)
 def signup(user: UserSignup):
@@ -533,7 +549,9 @@ def submit_exam(data: ExamSubmit, current_user: dict = Depends(verify_token)):
         "certificate": certificate_info
     }
 
-# ========== CERTIFICATE OTP ROUTES ==========
+# ========== CERTIFICATE DOWNLOAD METHODS ==========
+
+# Method 1: Send OTP
 @app.post("/api/certificate/send-otp")
 def send_certificate_otp(
     request: OTPRequest, 
@@ -578,10 +596,12 @@ def send_certificate_otp(
         "success": True,
         "message": "OTP sent to your registered email",
         "expires_in_minutes": 5,
-        "email": user_email[:3] + "***" + user_email[user_email.index('@'):]
+        "email": user_email[:3] + "***" + user_email[user_email.index('@'):],
+        "method": "otp"
     }
 
-@app.post("/api/certificate/verify-and-download")
+# Method 1: Verify OTP and Download
+@app.post("/api/certificate/verify-otp")
 def verify_otp_and_download(
     request: OTPVerifyRequest,
     current_user: dict = Depends(verify_token)
@@ -635,6 +655,128 @@ def verify_otp_and_download(
     else:
         raise HTTPException(status_code=500, detail="Failed to generate PDF")
 
+# Method 2: Verify Password and Download
+@app.post("/api/certificate/verify-password")
+def verify_password_and_download(
+    request: PasswordVerifyRequest,
+    current_user: dict = Depends(verify_token)
+):
+    """Verify login password and download certificate"""
+    
+    try:
+        assessment_object_id = ObjectId(request.assessment_id)
+    except:
+        raise HTTPException(status_code=400, detail="Invalid assessment ID format!")
+    
+    assessment = assessments_collection.find_one({
+        "_id": assessment_object_id,
+        "app_id": current_user.get("app_id")
+    })
+    
+    if not assessment:
+        raise HTTPException(status_code=404, detail="Assessment not found!")
+    
+    if not assessment.get("certificate_generated", False):
+        raise HTTPException(status_code=400, detail="Certificate not generated!")
+    
+    user_email = current_user.get("email")
+    
+    # Verify password
+    is_valid = verify_user_password(user_email, request.password)
+    
+    if not is_valid:
+        raise HTTPException(status_code=400, detail="Invalid password!")
+    
+    certificate_data = {
+        "certificate_id": assessment.get("certificate_id"),
+        "user_name": current_user.get("name"),
+        "user_email": user_email,
+        "skill_domain": assessment.get("skillDomain"),
+        "score": assessment.get("score"),
+        "issue_date": assessment.get("certificate_issue_date"),
+        "status": "active"
+    }
+    
+    pdf_buffer = generate_pdf_certificate(certificate_data)
+    
+    if pdf_buffer:
+        return StreamingResponse(
+            pdf_buffer,
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": f"attachment; filename=certificate_{assessment.get('certificate_id')}.pdf"
+            }
+        )
+    else:
+        raise HTTPException(status_code=500, detail="Failed to generate PDF")
+
+# Combined endpoint - supports both methods
+@app.post("/api/certificate/download")
+def download_certificate(
+    request: CertificateDownloadRequest,
+    current_user: dict = Depends(verify_token)
+):
+    """Download certificate using either OTP or Password method"""
+    
+    try:
+        assessment_object_id = ObjectId(request.assessment_id)
+    except:
+        raise HTTPException(status_code=400, detail="Invalid assessment ID format!")
+    
+    assessment = assessments_collection.find_one({
+        "_id": assessment_object_id,
+        "app_id": current_user.get("app_id")
+    })
+    
+    if not assessment:
+        raise HTTPException(status_code=404, detail="Assessment not found!")
+    
+    if not assessment.get("certificate_generated", False):
+        raise HTTPException(status_code=400, detail="Certificate not generated!")
+    
+    user_email = current_user.get("email")
+    
+    # Verify based on method
+    if request.method == "otp":
+        if not request.otp:
+            raise HTTPException(status_code=400, detail="OTP is required for OTP method!")
+        is_valid = verify_otp(user_email, request.otp)
+        if is_valid:
+            delete_otp(user_email)
+    elif request.method == "password":
+        if not request.password:
+            raise HTTPException(status_code=400, detail="Password is required for password method!")
+        is_valid = verify_user_password(user_email, request.password)
+    else:
+        raise HTTPException(status_code=400, detail="Invalid method! Use 'otp' or 'password'")
+    
+    if not is_valid:
+        raise HTTPException(status_code=400, detail="Verification failed! Invalid OTP or password.")
+    
+    certificate_data = {
+        "certificate_id": assessment.get("certificate_id"),
+        "user_name": current_user.get("name"),
+        "user_email": user_email,
+        "skill_domain": assessment.get("skillDomain"),
+        "score": assessment.get("score"),
+        "issue_date": assessment.get("certificate_issue_date"),
+        "status": "active"
+    }
+    
+    pdf_buffer = generate_pdf_certificate(certificate_data)
+    
+    if pdf_buffer:
+        return StreamingResponse(
+            pdf_buffer,
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": f"attachment; filename=certificate_{assessment.get('certificate_id')}.pdf"
+            }
+        )
+    else:
+        raise HTTPException(status_code=500, detail="Failed to generate PDF")
+
+# Resend OTP
 @app.post("/api/certificate/resend-otp")
 def resend_certificate_otp(
     request: OTPRequest,
@@ -737,7 +879,7 @@ def get_dashboard(current_user: dict = Depends(verify_token)):
         "assessmentHistory": history
     }
 
-# ========== DIRECT CERTIFICATE DOWNLOAD (Without OTP - for testing) ==========
+# ========== DIRECT CERTIFICATE DOWNLOAD ==========
 @app.get("/api/certificate/{assessment_id}")
 def get_certificate(assessment_id: str, download_pdf: bool = False, current_user: dict = Depends(verify_token)):
     """Get certificate for a specific assessment - can return JSON or PDF"""
@@ -859,3 +1001,8 @@ def direct_fix_certificates(current_user: dict = Depends(verify_token)):
         "certificates_fixed": updated_count,
         "details": details
     }
+
+# ========== HEALTH CHECK ==========
+@app.get("/api/health")
+def health_check():
+    return {"status": "ok", "timestamp": datetime.datetime.utcnow().isoformat()}
