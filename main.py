@@ -7,6 +7,7 @@ import jwt
 import datetime
 import os
 import sys
+import certifi
 
 app = FastAPI()
 
@@ -32,7 +33,12 @@ db = None
 users_collection = None
 
 try:
-    client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
+    client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000,tls=True,
+    tlsCAFile=certifi.where(),  
+    tlsAllowInvalidCertificates=False,   
+    connectTimeoutMS=20000,
+    socketTimeoutMS=20000
+)
     # Connection nijamga pani chestundo ledo check cheyadaniki
     client.server_info() 
     
